@@ -5,12 +5,7 @@
 # Adapted from LuminaireProtocol/telegram.sh
 # Source this script after build; requires env vars:
 #   ZIP_PATH, ZIP_NAME, KERNEL_VERSION
-#   ROOT_SOLUTION (RESUKISU|KSU_NEXT|SUKISU|VANILLA) — driven
-#     by build.yml's matrix.zip_type. History: shipped as RESUKISU, briefly
-#     and incorrectly switched to KSU_NEXT without a working susfs patch step
-#     (see build.yml comments), reverted back to RESUKISU. This case
-#     statement supports all values so it doesn't need touching again if
-#     the provider changes — only build.yml's env block should need editing.
+#   ROOT_SOLUTION (BAKASU|VANILLA) — driven by build.yml's matrix.
 #   KERNEL_SRC, KERNEL_BRANCH, COMPILER_STRING
 # ======================================================
 
@@ -40,23 +35,9 @@ if [ "$ZIP_SIZE_BYTES" -gt "$TELEGRAM_MAX_FILE_BYTES" ]; then
     return 0
 fi
 
-# PitchKernel: RESUKISU and RESUKISU_NOSUSFS are two distinct
-# root_solution_key values (see build.yml matrix.include) for the same
-# ReSukiSU provider with different Kconfig `choice` selections --
-# CONFIG_KSU_SUSFS vs CONFIG_KSU_MANUAL_HOOK (see build.yml's "Verify KSU
-# present and SUSFS actually compiled in" step, which asserts the actual
-# compiled .config matches whichever of these was intended). Both must be
-# labeled explicitly and distinctly here: previously bare "ReSukiSU" was
-# shown for RESUKISU (ambiguous -- a viewer can't tell SUSFS from
-# no-SUSFS from the caption alone), and RESUKISU_NOSUSFS fell through to
-# the unhandled default case, which printed the raw literal
-# "RESUKISU_NOSUSFS" instead of a real label.
 case "${ROOT_SOLUTION:-VANILLA}" in
-    KSU_NEXT)          ROOT_DISPLAY="KernelSU-Next" ;;
-    RESUKISU)          ROOT_DISPLAY="ReSukiSU (SUSFS)" ;;
-    RESUKISU_NOSUSFS)  ROOT_DISPLAY="ReSukiSU (No SUSFS)" ;;
-    SUKISU)            ROOT_DISPLAY="SukiSU"   ;;
-    VANILLA)           ROOT_DISPLAY="Vanilla"  ;;
+    BAKASU)            ROOT_DISPLAY="BakaSU (manual hooks)" ;;
+    VANILLA)           ROOT_DISPLAY="Vanilla" ;;
     *)                 ROOT_DISPLAY="${ROOT_SOLUTION}" ;;
 esac
 

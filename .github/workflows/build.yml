@@ -13,37 +13,16 @@ on:
       variants:
         # NOTE: this description is a static string — GitHub Actions evaluates
         # workflow_dispatch.inputs at trigger-definition time, before the
-        # matrix even exists, so it cannot reference matrix.root_provider
-        # below. Root providers are now set per matrix entry (see
-        # matrix.include further down) rather than as a job-level env var,
-        # specifically so adding one doesn't require touching this comment
-        # or any label elsewhere in the file by hand -- that manual-edit
-        # requirement is exactly what caused this repo to say "KernelSU
-        # Next" in five places after switching back to ReSukiSU.
-        #
-        # PitchKernel: SUSFS 2.3.0 is backported in-tree under
-        # CONFIG_KSU_SUSFS (verified present and enabled via the "Verify
-        # KSU present and SUSFS actually compiled in" step below). The
-        # 'susfs-only' option was removed and 'nosusfs-only' renamed to
-        # 'resukisu-only' in an earlier pass, on the basis that SUSFS
-        # shipped unconditionally with ReSukiSU and there was no
-        # independent toggle -- that basis changed 2026-09-21: build.sh
-        # now supports a second root_arg ("ksu-nosusfs") that swaps
-        # SUSFS's hook mechanism (CONFIG_KSU_SUSFS) for ReSukiSU's other,
-        # mutually exclusive hook mechanism (CONFIG_KSU_MANUAL_HOOK),
-        # added specifically to isolate whether SUSFS itself contributes
-        # to specific integrity/attestation-scanner findings (see
-        # CHANGELOG.md, 2026-09-21 entry). 'resukisu-nosusfs' below is
-        # EXPERIMENTAL and unverified on real hardware as of this pass --
-        # unlike 'resukisu-only', which has been the sole verified root
-        # path all session.
+        # Root provider details live in matrix.include below.
+        # BakaSU is built with manual hooks on this non-GKI 4.19 kernel.
+        # SUSFS remains disabled until its separate backport is validated
+        # against BakaSU on this device.
         description: 'Which variant(s) to build'
         required: true
         type: choice
-        default: 'resukisu-only'
+        default: 'bakasu-only'
         options:
-          - 'resukisu-only'
-          - 'resukisu-nosusfs'
+          - 'bakasu-only'
           - 'vanilla-only'
       skip_ccache:
         description: 'DIAGNOSTIC: skip restoring ccache for this run (forces a full rebuild, use to rule out stale-cache issues)'
@@ -73,19 +52,8 @@ jobs:
       # variant's otherwise-healthy build -- each variant ships or fails on
       # its own merit, as required.
       #
-      # PitchKernel: SUSFS 2.3.0 is backported in-tree under
-      # CONFIG_KSU_SUSFS, and is what "resukisu-only" below builds (the
-      # sole verified-on-hardware root path all session, asserted present
-      # via the "Verify KSU present and SUSFS actually compiled in" step).
-      # "resukisu-nosusfs" is a second, EXPERIMENTAL root variant added
-      # 2026-09-21 to isolate whether SUSFS itself contributes to specific
-      # integrity/attestation-scanner findings (CHANGELOG.md, same date):
-      # it builds the same ReSukiSU commit with CONFIG_KSU_MANUAL_HOOK
-      # instead of CONFIG_KSU_SUSFS (build.sh's new "ksu-nosusfs" root_arg
-      # -- these two are a mutually exclusive Kconfig `choice`, not
-      # independently toggleable, so this is a distinct variant rather
-      # than a susfs_enable flag on the existing one). Not yet confirmed
-      # booting/functioning on real hardware -- treat accordingly.
+      # BakaSU's manual-hook integration is the only root variant for this
+      # non-GKI 4.19 target. SUSFS stays off pending a separate device test.
       #
       # Each matrix entry carries its own root_arg (literal apasitu/
       # build.sh positional args), root_provider (human-readable) and
@@ -101,8 +69,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(
           inputs.variants == 'vanilla-only' && '[{"label":"Vanilla-NoRoot","ksu_enable":"false","root_arg":"","root_provider":"none","root_solution_key":"VANILLA","zip_type":"stock"}]' ||
-          inputs.variants == 'resukisu-nosusfs' && '[{"label":"ReSukiSU-NoSUSFS","ksu_enable":"true","root_arg":"ksu-nosusfs","root_provider":"ReSukiSU (no SUSFS, EXPERIMENTAL)","root_solution_key":"RESUKISU_NOSUSFS","zip_type":"resukisu-nosusfs"}]' ||
-          '[{"label":"ReSukiSU","ksu_enable":"true","root_arg":"ksu","root_provider":"ReSukiSU","root_solution_key":"RESUKISU","zip_type":"resukisu"}]'
+          '[{"label":"BakaSU","ksu_enable":"true","root_arg":"ksu","root_provider":"BakaSU (manual hooks)","root_solution_key":"BAKASU","zip_type":"bakasu"}]'
           ) }}
 
     steps:
@@ -222,10 +189,13 @@ jobs:
           git clone --depth=1 --single-branch -b "${KERNEL_SOURCE_BRANCH}" \
             "https://x-access-token:${PITCHKERNEL_REPO_PAT}@github.com/MujinnPark/pitch_kernel_sm8250.git" \
             apasitu
-          echo "--- Initializing submodules (KernelSU/ReSukiSU) ---"
+          echo "--- Initializing BakaSU submodule ---"
           git -C apasitu submodule update --init --recursive
-          echo "--- Verifying ReSukiSU submodule populated ---"
-          test -f apasitu/KernelSU/kernel/runtime/ksud_integration.c && echo "OK: ksud_integration.c present" || echo "MISSING: submodule did not populate correctly"
+          echo "--- Applying BakaSU post-exec compatibility patch ---"
+          bash apasitu/scripts/apply_bakasu_compat.sh
+          echo "--- Verifying BakaSU submodule populated ---"
+          test -f apasitu/KernelSU/kernel/runtime/ksud_integration.c && echo "OK: BakaSU ksud_integration.c present" || { echo "MISSING: BakaSU submodule did not populate correctly"; exit 1; }
+          test -e apasitu/drivers/kernelsu/Kconfig || { echo "MISSING: drivers/kernelsu does not resolve to BakaSU"; exit 1; }
           ls apasitu/build.sh apasitu/build-miui.sh
           RESOLVED_SHA=$(git -C apasitu rev-parse --short HEAD)
           echo "KERNEL_SOURCE_BRANCH=${KERNEL_SOURCE_BRANCH}" >> $GITHUB_ENV
@@ -234,52 +204,24 @@ jobs:
           echo "--- Verifying kernel/sched/walt.c margin_up initializer content ---"
           grep -n -A2 "sysctl_sched_capacity_margin_up\[MAX_MARGIN_LEVELS\]" apasitu/kernel/sched/walt.c || echo "PATTERN NOT FOUND"
 
-      - name: Guard ReSukiSU pin consistency
+      - name: Guard BakaSU submodule pin consistency
         run: |
-          # PitchKernel: RESUKISU_REF drift guard, added 2026-09-20.
-          #
-          # Real incident this pass: a single fix chain (ksu_handle_faccessat
-          # signature revert, then a separate setuid_hook.c stub fix) needed
-          # THREE separate CI build cycles to land, because the RESUKISU_REF
-          # pin in build.sh was bumped after the *previous* fix commit each
-          # time, not the one just pushed to the fork branch -- i.e. the pin
-          # was always one commit behind what was actually intended to be
-          # tested. Each mismatch only surfaced ~20 minutes into a build, at
-          # the "Build kernel" step, as a real compile failure against stale
-          # source -- burning a full build cycle each time to discover a
-          # one-line pin was wrong.
-          #
-          # This step catches that class of mistake in seconds, before the
-          # expensive build even starts, by checking three things agree:
-          #   1. build.sh's RESUKISU_REF
-          #   2. build-miui.sh's RESUKISU_REF
-          #   3. apasitu/KernelSU's actual checked-out HEAD (submodules are
-          #      already `git submodule update --init`'d by this point, so
-          #      this reflects the real gitlink, not an assumption)
-          #
-          # A fourth check compares all of the above against the live tip of
-          # the fork's pitch-munch-4.19-fix branch -- but this is a WARNING
-          # only, not a failure: the whole point of pinning (see the "Clone
-          # apasitu kernel source" step's own PINNED ON PURPOSE precedent)
-          # is to deliberately NOT track a branch tip live. Being behind the
-          # branch tip is often correct and intentional; being internally
-          # inconsistent (checks 1-3) is never correct.
-          BUILD_SH_REF=$(grep -oP 'RESUKISU_REF="\K[0-9a-f]{40}' apasitu/build.sh || true)
-          BUILD_MIUI_SH_REF=$(grep -oP 'RESUKISU_REF="\K[0-9a-f]{40}' apasitu/build-miui.sh || true)
+          BAKASU_URL=$(git -C apasitu config -f .gitmodules --get submodule.KernelSU.url || true)
+          EXPECTED_SHA=$(git -C apasitu ls-tree HEAD KernelSU | awk '{print $3}')
           SUBMODULE_HEAD=$(git -C apasitu/KernelSU rev-parse HEAD || true)
 
-          echo "build.sh RESUKISU_REF:       ${BUILD_SH_REF:-<not found>}"
-          echo "build-miui.sh RESUKISU_REF:  ${BUILD_MIUI_SH_REF:-<not found>}"
+          echo "KernelSU submodule URL:      ${BAKASU_URL:-<not found>}"
+          echo "KernelSU gitlink SHA:         ${EXPECTED_SHA:-<not found>}"
           echo "KernelSU submodule HEAD:     ${SUBMODULE_HEAD:-<not found>}"
 
           FAIL=0
 
-          if [ -z "$BUILD_SH_REF" ]; then
-            echo "::error::Could not extract a 40-char RESUKISU_REF from apasitu/build.sh"
+          if [ "$BAKASU_URL" != "https://github.com/Baka-SU/BakaSU.git" ]; then
+            echo "::error::KernelSU submodule URL is not BakaSU: ${BAKASU_URL:-<missing>}"
             FAIL=1
           fi
-          if [ -z "$BUILD_MIUI_SH_REF" ]; then
-            echo "::error::Could not extract a 40-char RESUKISU_REF from apasitu/build-miui.sh"
+          if [ -z "$EXPECTED_SHA" ]; then
+            echo "::error::Could not resolve the KernelSU gitlink SHA"
             FAIL=1
           fi
           if [ -z "$SUBMODULE_HEAD" ]; then
@@ -287,34 +229,33 @@ jobs:
             FAIL=1
           fi
 
-          if [ "$FAIL" -eq 0 ]; then
-            if [ "$BUILD_SH_REF" != "$BUILD_MIUI_SH_REF" ]; then
-              echo "::error::RESUKISU_REF mismatch: build.sh=${BUILD_SH_REF} but build-miui.sh=${BUILD_MIUI_SH_REF}. These must always match."
-              FAIL=1
-            fi
-            if [ "$BUILD_SH_REF" != "$SUBMODULE_HEAD" ]; then
-              echo "::error::RESUKISU_REF (${BUILD_SH_REF}) does not match apasitu/KernelSU's actual checked-out HEAD (${SUBMODULE_HEAD})."
-              echo "::error::The submodule gitlink recorded in pitch_kernel_sm8250 is stale relative to build.sh's pin (or vice versa) -- bump whichever is behind and re-commit."
-              FAIL=1
-            fi
+          if [ -n "$EXPECTED_SHA" ] && [ -n "$SUBMODULE_HEAD" ] && [ "$EXPECTED_SHA" != "$SUBMODULE_HEAD" ]; then
+            echo "::error::BakaSU checkout (${SUBMODULE_HEAD}) does not match the pinned KernelSU gitlink (${EXPECTED_SHA})."
+            FAIL=1
           fi
 
+          if grep -qE 'RESUKISU_REF|ReSukiSU/ReSukiSU/main/kernel/setup.sh' apasitu/build.sh apasitu/build-miui.sh; then
+            echo "::error::A ReSukiSU installer or pin remains in a build script. BakaSU must come from the pinned submodule only."
+            FAIL=1
+          fi
+
+          for SCRIPT in apasitu/build.sh apasitu/build-miui.sh; do
+            if ! grep -Fq 'git submodule update --init --recursive KernelSU' "$SCRIPT"; then
+              echo "::error::${SCRIPT} does not initialize the pinned BakaSU submodule."
+              FAIL=1
+            fi
+            if ! grep -Fq 'bash scripts/apply_bakasu_compat.sh' "$SCRIPT"; then
+              echo "::error::${SCRIPT} does not apply the tracked BakaSU compatibility patch."
+              FAIL=1
+            fi
+          done
+
           if [ "$FAIL" -eq 1 ]; then
-            echo "::error::ReSukiSU pin consistency check failed -- see above. Refusing to spend ~20 minutes building against a pin that is internally inconsistent. Fix pitch_kernel_sm8250's build.sh / build-miui.sh / KernelSU gitlink so all three agree, then re-run."
+            echo "::error::BakaSU pin/setup validation failed. Refusing to start a long build with an incorrect provider source."
             exit 1
           fi
 
-          echo "OK: build.sh, build-miui.sh, and the KernelSU submodule gitlink all agree on ${BUILD_SH_REF}."
-
-          echo "--- Informational: comparing against MujinnPark/ReSukiSU@pitch-munch-4.19-fix branch tip (not a failure condition) ---"
-          FORK_TIP=$(git ls-remote https://github.com/MujinnPark/ReSukiSU.git refs/heads/pitch-munch-4.19-fix | cut -f1)
-          if [ -z "$FORK_TIP" ]; then
-            echo "::warning::Could not resolve MujinnPark/ReSukiSU@pitch-munch-4.19-fix branch tip via ls-remote -- skipping informational comparison."
-          elif [ "$FORK_TIP" == "$BUILD_SH_REF" ]; then
-            echo "Pin is at the branch tip (${FORK_TIP}). Nothing pending."
-          else
-            echo "::warning::RESUKISU_REF (${BUILD_SH_REF}) is behind MujinnPark/ReSukiSU@pitch-munch-4.19-fix's current tip (${FORK_TIP}). This may be intentional (deliberately pinned to a known-good older commit) -- not failing the build over it. If a fix was pushed to the fork branch and you meant to test it, the pin needs bumping first."
-          fi
+          echo "OK: BakaSU URL, pinned gitlink, checked-out HEAD, and both build scripts agree."
 
       - name: Apply bypass charging patch
         run: |
@@ -399,12 +340,13 @@ jobs:
 
       - name: Verify ATFWD-daemon not excluded from sucompat
         run: |
-          if grep -rq "ATFWD-daemon" apasitu/kernel/ksu/ 2>/dev/null; then
+          SUCOMPAT_DIR="apasitu/KernelSU/kernel/feature"
+          [ -d "$SUCOMPAT_DIR" ] || { echo "FATAL: BakaSU feature directory missing: $SUCOMPAT_DIR"; exit 1; }
+          if grep -Rn "ATFWD-daemon" "$SUCOMPAT_DIR"; then
             echo "FATAL: ATFWD-daemon still present in KernelSU source after patch step."
-            grep -rn "ATFWD-daemon" apasitu/kernel/ksu/
             exit 1
           fi
-          echo "OK: ATFWD-daemon not found in KernelSU exclusion source."
+          echo "OK: ATFWD-daemon not found in BakaSU sucompat feature sources."
 
       - name: Set PitchKernel name
         run: |
@@ -560,7 +502,7 @@ jobs:
         with:
           path: ~/.cache/ccache_mikernel
           # Key includes OS, pinned clang release, defconfig content hash, and
-          # the matrix variant (zip_type: resukisu / stock) -- each compile a
+          # the matrix variant (zip_type: bakasu / stock) -- each compile a
           # materially different set of translation units, so these MUST NOT
           # share a cache key across matrix jobs, or two variants running
           # concurrently in the same matrix will race on actions/cache's key
@@ -641,9 +583,10 @@ jobs:
           set +e
           # PitchKernel: matrix.root_arg carries the literal apasitu/build.sh
           # positional args for this variant (see matrix.include above) --
-          # "" for vanilla, "ksu" for ReSukiSU. build.sh no longer accepts a
-          # "nosusfs" third positional arg -- SUSFS support was removed from
-          # the kernel tree entirely, so there is nothing left to toggle.
+          # "" for vanilla, "ksu" for BakaSU. build.sh no longer accepts a
+          # "nosusfs" third positional arg -- SUSFS is disabled for this
+          # BakaSU manual-hook build and remains available only as an
+          # unvalidated kernel-side backport.
           bash ${{ inputs.script }} munch ${{ matrix.root_arg }} > "$LOG" 2>&1
           BUILD_EXIT=$?
           set -e
@@ -793,7 +736,7 @@ jobs:
       - name: Annotate known-benign build noise
         run: |
           # PitchKernel: several third-party tools invoked during the build
-          # (ReSukiSU's setup.sh, ak3/symbol-scan utilities, wget) print raw,
+          # (BakaSU compatibility probes, ak3/symbol-scan utilities, wget) print raw,
           # unlabeled diagnostic lines that read like failures out of context --
           # this has already cost two full debugging round-trips (the
           # seccomp_types.h grep noise, the report_cfi_failure symbol-scan
@@ -826,10 +769,10 @@ jobs:
           }
 
           check_pattern "seccomp_types.h: No such file or directory" \
-            "ReSukiSU compat probe checks a GKI-era (5.x+) header that does not exist on this 4.19.325 non-GKI tree; grep fails harmlessly and ReSukiSU skips that compat shim. See build.yml 'Build kernel' step for the stderr filter and full explanation."
+            "BakaSU compatibility probe checks a GKI-era (5.x+) header that does not exist on this 4.19.325 non-GKI tree; grep fails harmlessly and BakaSU skips that compat shim. See build.yml 'Build kernel' step for the stderr filter and full explanation."
 
           check_pattern "no symbol: report_cfi_failure" \
-            "Symbol-scan tool checks for a name that has never existed in this kernel or ReSukiSU's shipped code under any config; the real exported symbol is cfi_failure_handler (kernel/cfi.c). CONFIG_CFI_CLANG=y with CONFIG_CFI_PERMISSIVE unset (enforcing mode) is correct and consistent with this miss. No fix needed."
+            "Symbol-scan tool checks for a name that has never existed in this kernel or BakaSU's shipped code under any config; the real exported symbol is cfi_failure_handler (kernel/cfi.c). CONFIG_CFI_CLANG=y with CONFIG_CFI_PERMISSIVE unset (enforcing mode) is correct and consistent with this miss. No fix needed."
 
           check_pattern "Error in reading or end of file." \
             "wget's own benign notice when opening a fresh connection with no prior resume state; the download it precedes (patch_linux from SukiSU-Ultra releases) completes normally in the following lines."
@@ -890,7 +833,7 @@ jobs:
         # where build.sh produced a flashable zip successfully and this step,
         # in its old position, never ran because nothing had failed yet at
         # that point in sequence. Moved here, after every step that can
-        # currently fail the job (LTO gate, and the KSU/SUSFS verification gate
+        # currently fail the job (LTO gate, and the BakaSU config verification gate
         # below would also need this if it can fail before packaging -- verify if
         # that step is ever moved earlier than this one). If more hard-fail
         # gates are added later in the job, keep this upload step positioned
@@ -902,118 +845,90 @@ jobs:
           path: /tmp/pitchkernel-build-step.log
           retention-days: 7
 
-      - name: Verify KSU present and SUSFS actually compiled in
+      - name: Verify BakaSU manual hooks compiled in
         run: |
-          # This step exists because of a real incident: a prior CI change swapped
-          # the root provider in apasitu/build.sh (ReSukiSU -> KernelSU-Next) without
-          # touching the `scripts/config -e KSU_SUSFS ...` block that followed it at
-          # the time. scripts/config does not validate against Kconfig — it blindly
-          # writes the .config line — and kbuild silently drops unrecognized symbols
-          # during syncconfig. That can silently ship a build mislabeled with respect
-          # to what it actually contains.
-          #
-          # PitchKernel: SUSFS 2.3.0 has been ported into this kernel tree
-          # (fs/susfs.c, include/linux/susfs.h, include/linux/susfs_def.h, plus
-          # the su-compat hook sites in fs/exec.c, fs/open.c, fs/stat.c wired
-          # through #ifdef CONFIG_KSU_SUSFS -- see the port's commit history
-          # for the full file list). build.sh/build-miui.sh now select
-          # CONFIG_KSU_SUSFS over CONFIG_KSU_MANUAL_HOOK in ReSukiSU's
-          # Kconfig `choice` block whenever KSU is enabled. This gate verifies
-          # that selection actually landed in the compiled config: every
-          # CONFIG_KSU_SUSFS* symbol must be PRESENT, and CONFIG_KSU_MANUAL_HOOK
-          # must be ABSENT, in every KSU-enabled build. If SUSFS symbols are
-          # ever missing again, it means the Kconfig wiring was reverted or a
-          # merge/backport silently dropped it without a deliberate decision
-          # to do so -- fail loudly, the same as the absence-gate this
-          # replaces failed loudly on the opposite condition.
           if [ "${{ matrix.ksu_enable }}" != "true" ]; then
-            echo "matrix.ksu_enable=false (variant: ${{ matrix.label }}) — no KSU/SUSFS expected, skipping verification."
+            echo "matrix.ksu_enable=false (variant: ${{ matrix.label }}) — no BakaSU expected, skipping verification."
             exit 0
+          fi
+
+          EXEC_SOURCE="apasitu/fs/exec.c"
+          if ! awk '
+            /retval = exec_binprm\(bprm\);/ { after_exec = 1; next }
+            after_exec && /ksu_handle_post_execveat/ { found = 1 }
+            after_exec && /return retval;/ { exit (found ? 0 : 1) }
+            END { if (!found) exit 1 }
+          ' "$EXEC_SOURCE"; then
+            echo "FATAL: BakaSU post-exec hook is missing from the successful exec path in $EXEC_SOURCE."
+            exit 1
+          fi
+
+          if ! awk '
+            /^out_ret:/ { in_error_path = 1; next }
+            in_error_path && /ksu_handle_post_execveat/ { found = 1 }
+            in_error_path && /return retval;/ { exit (found ? 0 : 1) }
+            END { if (!found) exit 1 }
+          ' "$EXEC_SOURCE"; then
+            echo "FATAL: BakaSU post-exec hook is missing from the exec error path in $EXEC_SOURCE."
+            exit 1
+          fi
+
+          BAKASU_SOURCE="apasitu/KernelSU/kernel/feature/sucompat.c"
+          if ! grep -Fq 'clear_thread_flag(TIF_PROC_IN_KSU_EXECVE);' "$BAKASU_SOURCE" ||
+             ! grep -Fq 'if (retval && *retval < 0)' "$BAKASU_SOURCE"; then
+            echo "FATAL: BakaSU post-exec flag compatibility patch is missing or incomplete in $BAKASU_SOURCE."
+            exit 1
+          fi
+          if ! awk '
+            /int ksu_handle_post_execve_common/ { in_handler = 1 }
+            in_handler && /clear_thread_flag\(TIF_PROC_IN_KSU_EXECVE\)/ { clear_line = NR }
+            in_handler && /if \(retval && \*retval < 0\)/ { error_guard_line = NR }
+            in_handler && /ksu_install_su_fd\(\)/ { install_line = NR; exit }
+            END {
+              if (clear_line && error_guard_line && install_line &&
+                  clear_line < error_guard_line && error_guard_line < install_line)
+                exit 0
+              exit 1
+            }
+          ' "$BAKASU_SOURCE"; then
+            echo "FATAL: BakaSU must consume the pending flag and reject failed execs before installing the session FD."
+            exit 1
           fi
 
           CONFIG_FILE="apasitu/out/.config"
           [ -f "$CONFIG_FILE" ] || { echo "FATAL: $CONFIG_FILE not found — build may not have produced a config"; exit 1; }
 
-          # PitchKernel: all 9 KSU_SUSFS_* sub-symbols plus the top-level
-          # CONFIG_KSU_SUSFS gate itself.
-          SUSFS_SYMS="CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP"
-
           BAD=0
-          if grep -q "^CONFIG_KSU=y" "$CONFIG_FILE"; then
-            echo "  OK: CONFIG_KSU=y"
-          else
-            echo "  MISSING: CONFIG_KSU is not set to y — this variant should still have KSU (ReSukiSU)"
-            BAD=1
-          fi
-
-          # PitchKernel 2026-09-21: root_arg "ksu-nosusfs" (matrix label
-          # ReSukiSU-NoSUSFS) deliberately selects CONFIG_KSU_MANUAL_HOOK
-          # instead of CONFIG_KSU_SUSFS -- the mutually-exclusive Kconfig
-          # `choice` this whole gate is built around, just the other side
-          # of it. Assert the mirror-image expectation for that variant
-          # rather than skipping verification and losing the safety net:
-          # KSU_MANUAL_HOOK must be PRESENT and every KSU_SUSFS* symbol
-          # must be ABSENT, exactly reversed from the resukisu-only case.
-          if [ "${{ matrix.root_arg }}" == "ksu-nosusfs" ]; then
-            echo "Checking $CONFIG_FILE for KSU_MANUAL_HOOK (expect PRESENT) and SUSFS symbols (expect ABSENT)..."
-            if grep -q "^CONFIG_KSU_MANUAL_HOOK=y" "$CONFIG_FILE"; then
-              echo "  OK: CONFIG_KSU_MANUAL_HOOK=y"
-            else
-              echo "  MISSING: CONFIG_KSU_MANUAL_HOOK is not set to y — root_arg ksu-nosusfs should select it"
-              BAD=1
-            fi
-
-            for SYM in $SUSFS_SYMS; do
-              if grep -q "^${SYM}=y" "$CONFIG_FILE"; then
-                echo "  LEAKED: ${SYM}=y is set, but this variant selects KSU_MANUAL_HOOK instead"
-                BAD=1
-              else
-                echo "  OK: ${SYM} is not set to y"
-              fi
-            done
-
-            if [ "$BAD" -eq 1 ]; then
-              echo ""
-              echo "FATAL: KSU is missing, KSU_MANUAL_HOOK failed to land, or a KSU_SUSFS* symbol"
-              echo "leaked into a variant that should not have it. Do not let this build ship."
-              exit 1
-            fi
-
-            echo "'${{ matrix.label }}' verification passed — KSU present, KSU_MANUAL_HOOK genuinely compiled in, no SUSFS leakage."
-            exit 0
-          fi
-
-          echo "Checking $CONFIG_FILE for KSU and SUSFS symbols (expect PRESENT) and KSU_MANUAL_HOOK (expect ABSENT)..."
-          if grep -q "^CONFIG_KSU_MANUAL_HOOK=y" "$CONFIG_FILE"; then
-            echo "  LEAKED: CONFIG_KSU_MANUAL_HOOK=y is set, but this tree now selects KSU_SUSFS"
-            echo "  instead (KSU_MANUAL_HOOK and KSU_SUSFS are mutually exclusive in ReSukiSU's"
-            echo "  Kconfig choice block) -- the su-compat hook sites in fs/exec.c, fs/open.c,"
-            echo "  and fs/stat.c expect KSU_SUSFS's call signatures, not KSU_MANUAL_HOOK's."
-            BAD=1
-          else
-            echo "  OK: CONFIG_KSU_MANUAL_HOOK is not set to y"
-          fi
-
-          for SYM in $SUSFS_SYMS; do
+          REQUIRED_SYMS="CONFIG_KSU CONFIG_KSU_MANUAL_HOOK CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK"
+          for SYM in $REQUIRED_SYMS; do
             if grep -q "^${SYM}=y" "$CONFIG_FILE"; then
               echo "  OK: ${SYM}=y"
             else
-              echo "  MISSING: ${SYM} is not set to y — SUSFS should be fully enabled in this variant"
+              echo "  MISSING: ${SYM} is not set to y"
               BAD=1
             fi
           done
 
+          if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y' "$CONFIG_FILE"; then
+            echo "  LEAKED: CONFIG_KSU_TRACEPOINT_HOOK=y conflicts with the manual-hook build"
+            BAD=1
+          fi
+
+          if grep -q '^CONFIG_KSU_SUSFS.*=y' "$CONFIG_FILE"; then
+            echo "  LEAKED: a CONFIG_KSU_SUSFS symbol is enabled in the initial BakaSU manual-hook variant"
+            grep '^CONFIG_KSU_SUSFS.*=y' "$CONFIG_FILE"
+            BAD=1
+          else
+            echo "  OK: SUSFS symbols are disabled"
+          fi
+
           if [ "$BAD" -eq 1 ]; then
             echo ""
-            echo "FATAL: either KSU is missing, KSU_MANUAL_HOOK leaked in alongside KSU_SUSFS,"
-            echo "or a CONFIG_KSU_SUSFS* symbol failed to land despite the port. Do not let"
-            echo "this build ship -- check for a reverted SUSFS source file, a reverted"
-            echo "'scripts/config -e KSU_SUSFS...' call in build.sh/build-miui.sh, or a merge"
-            echo "that silently dropped the port."
+            echo "FATAL: BakaSU manual-hook configuration is incomplete or conflicting."
             exit 1
           fi
 
-          echo "'${{ matrix.label }}' verification passed — KSU present, SUSFS genuinely compiled in."
+          echo "'${{ matrix.label }}' verification passed — BakaSU and its manual hooks are enabled; SUSFS is disabled."
 
       - name: Verify uclamp actually compiled in
         if: false  # TEMP: intentional A/B test, see freeze investigation

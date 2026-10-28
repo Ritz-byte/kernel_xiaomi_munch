@@ -37,10 +37,9 @@ CHANGELOG.md    — bugs found and fixed, chronologically, so "was this already
 Manual dispatch only (`workflow_dispatch`). Inputs:
 - `script`: only `build.sh` (AOSP+MIUI dual zip) is wired into packaging.
   `build-miui.sh` exists upstream but this pipeline doesn't use it.
-- `ksu`: enables the current root provider (see STATUS.md for which one
-  that actually is right now, and for current SUSFS status — it has been
-  removed and re-added at different points; don't assume either state
-  without checking STATUS.md's most recent update).
+- `ksu`: enables BakaSU with manual hooks. SUSFS is disabled for this
+  initial non-GKI integration. A tracked compatibility patch handles
+  BakaSU's post-exec thread flag; see STATUS.md for validation status.
 
 ## Known open issues (not fixed in this pass — need real device/log evidence)
 

@@ -8,6 +8,26 @@ boolean comparison bug, 3+ times). Check here before re-fixing something
 that might already be marked done, and check here before assuming something
 is done that might have regressed.
 
+## 2026-10-28 — BakaSU non-GKI manual-hook migration
+
+- **Changed**: switched the pinned `KernelSU` submodule to BakaSU and made
+  both kernel build scripts use that gitlink directly instead of fetching
+  ReSukiSU's setup script at build time.
+- **Added**: BakaSU's required 4.19 manual-hook support for post-exec and
+  reboot, and exposed the SELinux symbols required by its integration guide.
+- **Fixed before validation**: the first post-exec hook placement only ran
+  during error cleanup, skipping successful `su` execs and BakaSU's session
+  descriptor setup. It now runs on both success and error exits, following
+  BakaSU's manual integration guide; CI guards both placements.
+- **Added**: a tracked BakaSU compatibility patch consumes
+  `TIF_PROC_IN_KSU_EXECVE` in the post-exec handler and skips session-FD
+  installation when exec fails. The flag otherwise persists and is copied
+  into new arm64 tasks. Both build scripts apply the patch, and CI verifies
+  its effects.
+- **Changed**: CI now verifies the BakaSU gitlink and manual-hook config;
+  SUSFS stays disabled until its backport is separately validated against
+  BakaSU. Full CI and device boot/root validation are still required.
+
 ## 2026-09-20 — ReSukiSU v4.2.0-rc2 update, non-GKI signature/stub fixes, CI pin guard, sepolicy cleanup, zram resize, cpufreq race fix
 
 - **Fixed**: KernelSU submodule (ReSukiSU) updated from pinned commit

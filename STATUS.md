@@ -159,3 +159,22 @@ removed entirely" claim (in `build.sh`, `build-miui.sh`, `build.yml`, and
 this repo's `README.md`) were corrected in the same pass as this update.
 This file was the last one fixed, appended rather than edited in place, to
 preserve the original 2026-07-03 audit as a historical record.
+
+## UPDATE (2026-10-28): BakaSU migration in progress
+
+The kernel source branch now pins `Baka-SU/BakaSU` through the `KernelSU`
+submodule. Both `build.sh` and `build-miui.sh` use that pinned gitlink
+directly and select BakaSU's manual-hook mode for this non-GKI 4.19 kernel.
+The kernel-side changes add the required post-exec and reboot hooks and
+expose BakaSU's required SELinux symbols. A tracked compatibility patch
+consumes BakaSU's pending-exec thread flag in the post-exec handler and
+avoids installing a session FD after a failed exec. The workflow now checks
+the submodule pin, manual-hook Kconfig symbols, BakaSU artifact label,
+post-exec hook placement on both successful and error exec paths, and the
+compatibility patch.
+
+SUSFS is disabled in this initial BakaSU variant. Although SUSFS is
+backported in the kernel tree, BakaSU's guide requires a separate non-GKI
+backport validation; do not assume the previous ReSukiSU+SUSFS build
+behavior carries over. This migration has not yet passed a full CI build or
+real-device boot/root test, so it is not confirmed as shipped.
