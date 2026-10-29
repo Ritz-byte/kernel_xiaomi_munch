@@ -34,12 +34,17 @@ CHANGELOG.md    — bugs found and fixed, chronologically, so "was this already
 
 ## Build
 
-Manual dispatch only (`workflow_dispatch`). Inputs:
+Manual dispatch only (`workflow_dispatch`). The workflow builds only the
+known-good BakaSU manual-hook (NoSUSFS) variant, based on kernel source
+revision `081909143` (the source used by release
+`PitchKernel-munch-bakasu-20261028-0402`). The source pin must not be changed
+without a successful device boot test. Inputs:
 - `script`: only `build.sh` (AOSP+MIUI dual zip) is wired into packaging.
   `build-miui.sh` exists upstream but this pipeline doesn't use it.
-- `ksu`: enables BakaSU with manual hooks. SUSFS is disabled for this
-  initial non-GKI integration. A tracked compatibility patch handles
-  BakaSU's post-exec thread flag; see STATUS.md for validation status.
+- `skip_ccache`: optional diagnostic to force a clean rebuild.
+
+SUSFS and source-branch overrides are not offered because the BakaSU SUSFS
+backport caused a reported bootloop and has not been validated on-device.
 
 ## Known open issues (not fixed in this pass — need real device/log evidence)
 

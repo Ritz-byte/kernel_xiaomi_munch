@@ -10,32 +10,11 @@ on:
         type: choice
         options:
           - build.sh
-      variants:
-        # NOTE: this description is a static string — GitHub Actions evaluates
-        # workflow_dispatch.inputs at trigger-definition time, before the
-        # Root provider details live in matrix.include below.
-        # BakaSU supports both manual-hook (NoSUSFS) and SUSFS variants on
-        # the Munch kernel source's bakasu-integration branch.
-        description: 'Which variant(s) to build'
-        required: true
-        type: choice
-        default: 'bakasu-both'
-        options:
-          - 'bakasu-both'
-          - 'bakasu-nosusfs-only'
-          - 'bakasu-susfs-only'
-          - 'vanilla-only'
       skip_ccache:
         description: 'DIAGNOSTIC: skip restoring ccache for this run (forces a full rebuild, use to rule out stale-cache issues)'
         required: false
         type: boolean
         default: false
-      source_branch_override:
-        description: 'Optional kernel source branch override. Leave empty to use bakasu-integration, which contains the BakaSU and SUSFS build support.'
-        required: false
-        type: string
-        default: ''
-
 permissions:
   contents: write
 
@@ -53,28 +32,18 @@ jobs:
       # variant's otherwise-healthy build -- each variant ships or fails on
       # its own merit, as required.
       #
-      # The source branch supplies both BakaSU manual-hook (NoSUSFS) and
-      # SUSFS configurations; their Kconfig hook methods are mutually exclusive.
+      # Only the BakaSU manual-hook configuration is shipped. SUSFS remains
+      # disabled until its non-GKI backport is validated on device.
       #
-      # Each matrix entry carries its own root_arg (literal apasitu/
-      # build.sh positional args), root_provider (human-readable) and
-      # root_solution_key (machine key matching a telegram.sh case)
-      # instead of a job-level ROOT_PROVIDER/ROOT_SOLUTION_KEY env var --
-      # keeps this file correct if a third root provider is ever added
-      # again without needing a job-level constant that can't hold two
-      # different values for two different root-providing matrix entries
-      # in the same run. ksu_enable is kept as a simple "is any root
-      # provider active" boolean so matrix.ksu_enable checks elsewhere in
-      # this file (uclamp gate) stay unchanged.
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(
-          inputs.variants == 'vanilla-only' && '[{"label":"Vanilla-NoRoot","ksu_enable":"false","root_arg":"","root_provider":"none","root_solution_key":"VANILLA","zip_type":"stock"}]' ||
-          inputs.variants == 'bakasu-susfs-only' && '[{"label":"BakaSU-SUSFS","ksu_enable":"true","root_arg":"ksu susfs","root_provider":"BakaSU + SUSFS","root_solution_key":"BAKASU_SUSFS","zip_type":"bakasu-susfs"}]' ||
-          inputs.variants == 'bakasu-nosusfs-only' && '[{"label":"BakaSU-NoSUSFS","ksu_enable":"true","root_arg":"ksu","root_provider":"BakaSU (manual hooks, NoSUSFS)","root_solution_key":"BAKASU","zip_type":"bakasu"}]' ||
-          inputs.variants == 'bakasu-both' && '[{"label":"BakaSU-NoSUSFS","ksu_enable":"true","root_arg":"ksu","root_provider":"BakaSU (manual hooks, NoSUSFS)","root_solution_key":"BAKASU","zip_type":"bakasu"},{"label":"BakaSU-SUSFS","ksu_enable":"true","root_arg":"ksu susfs","root_provider":"BakaSU + SUSFS","root_solution_key":"BAKASU_SUSFS","zip_type":"bakasu-susfs"}]' ||
-          '[{"label":"BakaSU-NoSUSFS","ksu_enable":"true","root_arg":"ksu","root_provider":"BakaSU (manual hooks, NoSUSFS)","root_solution_key":"BAKASU","zip_type":"bakasu"}]'
-          ) }}
+        include:
+          - label: BakaSU-NoSUSFS
+            ksu_enable: 'true'
+            root_arg: ksu
+            root_provider: BakaSU (manual hooks, NoSUSFS)
+            root_solution_key: BAKASU
+            zip_type: bakasu
 
     steps:
       - name: Checkout PitchKernel repo
@@ -127,10 +96,8 @@ jobs:
           # Every build run before this fix may have silently built the wrong tree
           # with no error, because both branches have a valid build.sh/build-miui.sh
           # and both build successfully — there's no structural signal that you got
-          # the wrong one. If the default branch changes again, or if you
-          # deliberately mean to track a different branch, that's fine — just make
-          # the change here, explicitly, and update KERNEL_SOURCE_BRANCH below to
-          # match. Do not go back to letting `git clone` pick for you.
+          # the wrong one. The source branch is pinned explicitly below, and the
+          # known-good commit is checked out before building; do not build the tip.
           #
           # 2026-08-18: source repo migrated from MujinnPark/android_kernel_xiaomi_sm8250
           # (branch android16-pitchkernel) to MujinnPark/pitch_kernel_sm8250 (branch
@@ -140,15 +107,11 @@ jobs:
           # pin is ever reverted, revert branch to android16-pitchkernel too, they are
           # not interchangeable across repos.
           #
-          # source_branch_override (originally added for PitchKernel MGLRU
-          # phase-by-phase testing, kept as general-purpose infra after that
-          # backport was reverted): only takes effect when explicitly set on
-          # workflow_dispatch. Empty input -> falls through to the pinned
-          # bakasu-integration default below. This is a per-run diagnostic override, not a replacement
-          # for updating the
-          # pin above if you actually want to permanently track a different
-          # branch.
-          KERNEL_SOURCE_BRANCH: ${{ inputs.source_branch_override != '' && inputs.source_branch_override || 'bakasu-integration' }}
+          # Known-good baseline: the source revision used by release
+          # PitchKernel-munch-bakasu-20261028-0402. Bump only after a
+          # successful device boot test.
+          KERNEL_SOURCE_BRANCH: bakasu-integration
+          KERNEL_SOURCE_COMMIT: 081909143
           # PitchKernel: pitch_kernel_sm8250 is private -- see the clone
           # command below for why this secret is required and what scope
           # it needs. Passed through env: (not referenced directly in the
@@ -157,10 +120,7 @@ jobs:
           # expansion at execution time.
           PITCHKERNEL_REPO_PAT: ${{ secrets.PITCHKERNEL_REPO_PAT }}
         run: |
-          if [ -n "${{ inputs.source_branch_override }}" ]; then
-            echo "::warning::source_branch_override set — building '${KERNEL_SOURCE_BRANCH}' instead of the pinned bakasu-integration branch"
-          fi
-          echo "Cloning branch: ${KERNEL_SOURCE_BRANCH} (pinned explicitly — see step comment)"
+          echo "Cloning ${KERNEL_SOURCE_BRANCH} and pinning ${KERNEL_SOURCE_COMMIT}"
           # PitchKernel: pitch_kernel_sm8250 is a PRIVATE repo. The earlier
           # fix here (clearing http.extraheader / credential.helper,
           # GIT_TERMINAL_PROMPT=0) was based on a wrong diagnosis -- it
@@ -189,9 +149,24 @@ jobs:
             echo "::error::kernel_xiaomi_munch's repo settings."
             exit 1
           fi
-          git clone --depth=1 --single-branch -b "${KERNEL_SOURCE_BRANCH}" \
+          git clone --depth=50 --single-branch -b "${KERNEL_SOURCE_BRANCH}" \
             "https://x-access-token:${PITCHKERNEL_REPO_PAT}@github.com/MujinnPark/pitch_kernel_sm8250.git" \
             apasitu
+          if ! git -C apasitu rev-parse --verify "${KERNEL_SOURCE_COMMIT}^{commit}" >/dev/null 2>&1; then
+            echo "::error::Pinned source ${KERNEL_SOURCE_COMMIT} is not available in the fetched history. Refusing to build the moving branch tip."
+            exit 1
+          fi
+          git -C apasitu checkout --detach "${KERNEL_SOURCE_COMMIT}"
+          RESOLVED_COMMIT=$(git -C apasitu rev-parse HEAD)
+          case "${RESOLVED_COMMIT}" in
+            "${KERNEL_SOURCE_COMMIT}"*) ;;
+            *) echo "::error::Expected kernel source prefix ${KERNEL_SOURCE_COMMIT}, resolved ${RESOLVED_COMMIT}."; exit 1 ;;
+          esac
+          RESOLVED_SHA=$(git -C apasitu rev-parse --short HEAD)
+          if [ -z "${RESOLVED_SHA}" ]; then
+            echo "::error::Could not determine resolved kernel source revision."
+            exit 1
+          fi
           echo "--- Initializing BakaSU submodule ---"
           git -C apasitu submodule update --init --recursive
           echo "--- Applying BakaSU post-exec compatibility patch ---"
@@ -200,7 +175,6 @@ jobs:
           test -f apasitu/KernelSU/kernel/runtime/ksud_integration.c && echo "OK: BakaSU ksud_integration.c present" || { echo "MISSING: BakaSU submodule did not populate correctly"; exit 1; }
           test -e apasitu/drivers/kernelsu/Kconfig || { echo "MISSING: drivers/kernelsu does not resolve to BakaSU"; exit 1; }
           ls apasitu/build.sh apasitu/build-miui.sh
-          RESOLVED_SHA=$(git -C apasitu rev-parse --short HEAD)
           echo "KERNEL_SOURCE_BRANCH=${KERNEL_SOURCE_BRANCH}" >> $GITHUB_ENV
           echo "KERNEL_SOURCE_SHA=${RESOLVED_SHA}" >> $GITHUB_ENV
           echo "Resolved to commit: ${RESOLVED_SHA}"
@@ -510,8 +484,8 @@ jobs:
           # share a cache key across matrix jobs, or two variants running
           # concurrently in the same matrix will race on actions/cache's key
           # and silently cross-contaminate each other's object cache).
-          # restore-keys fall back progressively so a partial match beats a
-          # cold cache, scoped to the same variant only.
+          # Restore only within this variant and pinned kernel source revision;
+          # do not fall back to objects cached from a different source commit.
           #
           # KNOWN GAP (found 2026-07-18): this key does NOT hash the kernel
           # source tree itself -- only the defconfig file. A .c-file-only
@@ -528,10 +502,9 @@ jobs:
           # value, the key needs to incorporate a source-tree hash (e.g. the
           # cloned commit SHA) directly, not just rely on ccache's internal
           # content check.
-          key: ccache-munch-${{ runner.os }}-neutronclang23-30062026-${{ matrix.zip_type }}-${{ inputs.source_branch_override != '' && inputs.source_branch_override || 'bakasu-integration' }}-${{ hashFiles('apasitu/arch/arm64/configs/munch_defconfig') }}
+          key: ccache-munch-${{ runner.os }}-neutronclang23-30062026-${{ matrix.zip_type }}-081909143-${{ hashFiles('apasitu/arch/arm64/configs/munch_defconfig') }}
           restore-keys: |
-            ccache-munch-${{ runner.os }}-neutronclang23-30062026-${{ matrix.zip_type }}-
-            ccache-munch-${{ runner.os }}-neutronclang23-30062026-
+            ccache-munch-${{ runner.os }}-neutronclang23-30062026-${{ matrix.zip_type }}-081909143-
 
       - name: Build kernel
         # PitchKernel: log capture redesigned after a measured regression.
@@ -586,8 +559,7 @@ jobs:
           set +e
           # PitchKernel: matrix.root_arg carries the literal apasitu/build.sh
           # positional args for this variant (see matrix.include above) --
-          # "" for vanilla, "ksu" for BakaSU NoSUSFS, and "ksu susfs" for
-          # the BakaSU SUSFS variant.
+          # "" for vanilla and "ksu" for BakaSU manual hooks (NoSUSFS).
           export TOOLCHAIN_PATH="$HOME/neutron-clang/bin"
           bash ${{ inputs.script }} munch ${{ matrix.root_arg }} > "$LOG" 2>&1
           BUILD_EXIT=$?
@@ -733,7 +705,7 @@ jobs:
           # restore key would silently no-op on every run after the first.
           # run_id makes each save unique; restore-keys prefix-matching on the
           # next run picks up the most recent save automatically.
-          key: ccache-munch-${{ runner.os }}-neutronclang23-30062026-${{ matrix.zip_type }}-${{ inputs.source_branch_override != '' && inputs.source_branch_override || 'bakasu-integration' }}-${{ hashFiles('apasitu/arch/arm64/configs/munch_defconfig') }}-${{ github.run_id }}
+          key: ccache-munch-${{ runner.os }}-neutronclang23-30062026-${{ matrix.zip_type }}-081909143-${{ hashFiles('apasitu/arch/arm64/configs/munch_defconfig') }}-${{ github.run_id }}
 
       - name: Annotate known-benign build noise
         run: |
@@ -901,11 +873,7 @@ jobs:
           [ -f "$CONFIG_FILE" ] || { echo "FATAL: $CONFIG_FILE not found — build may not have produced a config"; exit 1; }
 
           BAD=0
-          if [ "${{ matrix.zip_type }}" = "bakasu-susfs" ]; then
-            REQUIRED_SYMS="CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_ENABLE_LOG CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP"
-          else
-            REQUIRED_SYMS="CONFIG_KSU CONFIG_KSU_MANUAL_HOOK CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK"
-          fi
+          REQUIRED_SYMS="CONFIG_KSU CONFIG_KSU_MANUAL_HOOK CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK"
           for SYM in $REQUIRED_SYMS; do
             if grep -q "^${SYM}=y" "$CONFIG_FILE"; then
               echo "  OK: ${SYM}=y"
@@ -920,21 +888,12 @@ jobs:
             BAD=1
           fi
 
-          if [ "${{ matrix.zip_type }}" = "bakasu-susfs" ]; then
-            if grep -q '^CONFIG_KSU_MANUAL_HOOK=y' "$CONFIG_FILE"; then
-              echo "  LEAKED: CONFIG_KSU_MANUAL_HOOK=y conflicts with the SUSFS hook method"
-              BAD=1
-            else
-              echo "  OK: manual hooks are disabled for the SUSFS hook method"
-            fi
+          if grep -q '^CONFIG_KSU_SUSFS.*=y' "$CONFIG_FILE"; then
+            echo "  LEAKED: a CONFIG_KSU_SUSFS symbol is enabled in the BakaSU build"
+            grep '^CONFIG_KSU_SUSFS.*=y' "$CONFIG_FILE"
+            BAD=1
           else
-            if grep -q '^CONFIG_KSU_SUSFS.*=y' "$CONFIG_FILE"; then
-              echo "  LEAKED: a CONFIG_KSU_SUSFS symbol is enabled in the BakaSU NoSUSFS variant"
-              grep '^CONFIG_KSU_SUSFS.*=y' "$CONFIG_FILE"
-              BAD=1
-            else
-              echo "  OK: SUSFS symbols are disabled"
-            fi
+            echo "  OK: SUSFS symbols are disabled"
           fi
 
           if [ "$BAD" -eq 1 ]; then
@@ -1240,7 +1199,7 @@ jobs:
           TELEGRAM_THREAD_ID_ARTIFACT: ${{ secrets.TELEGRAM_THREAD_ID_ARTIFACT }}
           KERNEL_VERSION: "4.19"
           ROOT_SOLUTION: ${{ matrix.root_solution_key }}
-          KERNEL_BRANCH: "${{ inputs.source_branch_override != '' && inputs.source_branch_override || 'bakasu-integration' }}@${{ env.KERNEL_SOURCE_SHA }}"
+          KERNEL_BRANCH: "${{ env.KERNEL_SOURCE_BRANCH }}@${{ env.KERNEL_SOURCE_SHA }}"
           COMPILER_STRING: "ZyCromerZ Clang 16.0.6-20260807"
           KERNEL_SRC: "apasitu"
         run: |
@@ -1266,7 +1225,7 @@ jobs:
             **Build date:** ${{ env.BUILD_DATE }}
             **Variant:** ${{ matrix.label }}
             **Type:** ${{ env.BUILD_TYPE }}
-            **Base:** MujinnPark/pitch_kernel_sm8250 @ `${{ inputs.source_branch_override != '' && inputs.source_branch_override || 'bakasu-integration' }}` (`${{ env.KERNEL_SOURCE_SHA }}`)
+            **Base:** MujinnPark/pitch_kernel_sm8250 @ `${{ env.KERNEL_SOURCE_BRANCH }}` (`${{ env.KERNEL_SOURCE_SHA }}`)
             **Toolchain:** ZyCromerZ Clang 16.0.6-20260807
 
             ### Features

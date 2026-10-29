@@ -8,6 +8,24 @@ boolean comparison bug, 3+ times). Check here before re-fixing something
 that might already be marked done, and check here before assuming something
 is done that might have regressed.
 
+## 2026-10-29 — disable unvalidated BakaSU SUSFS build
+
+- **Removed from workflow**: the BakaSU+SUSFS and combined build choices.
+  BakaSU manual hooks (NoSUSFS) are now the only rooted build option and the
+  default. CI verifies the manual-hook config and fails if any SUSFS config
+  symbol is enabled.
+- **Reason**: a device bootloop was reported with the BakaSU+SUSFS build.
+  The exact cause is unconfirmed; BakaSU's guide requires a manual non-GKI
+  SUSFS backport and matching kernel-side patches, which the workflow's
+  config-symbol checks do not validate.
+- **Scope**: this disables SUSFS in the shipped BakaSU build path; it does
+  not remove the SUSFS source/backport from the private kernel source tree.
+  BPF settings are unchanged.
+- **Pinned baseline**: workflow runs now build source revision `081909143`,
+  used by the known-good `PitchKernel-munch-bakasu-20261028-0402` release.
+  Source overrides and other variants were removed so a run cannot silently
+  switch to the newer, unvalidated branch tip.
+
 ## 2026-10-28 — BakaSU non-GKI manual-hook migration
 
 - **Changed**: switched the pinned `KernelSU` submodule to BakaSU and made

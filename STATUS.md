@@ -173,8 +173,20 @@ the submodule pin, manual-hook Kconfig symbols, BakaSU artifact label,
 post-exec hook placement on both successful and error exec paths, and the
 compatibility patch.
 
-SUSFS is disabled in this initial BakaSU variant. Although SUSFS is
-backported in the kernel tree, BakaSU's guide requires a separate non-GKI
-backport validation; do not assume the previous ReSukiSU+SUSFS build
-behavior carries over. This migration has not yet passed a full CI build or
-real-device boot/root test, so it is not confirmed as shipped.
+SUSFS was disabled in the initial BakaSU variant. See the 2026-10-29 update
+below for the current workflow state.
+
+## UPDATE (2026-10-29): BakaSU SUSFS build disabled
+
+The BakaSU+SUSFS and combined workflow choices have been removed after a
+device bootloop report. BakaSU manual-hook (NoSUSFS) is the only rooted
+variant and the workflow default; CI checks that SUSFS config symbols remain
+off. The exact bootloop cause is not confirmed. The BakaSU guide requires a
+manual non-GKI SUSFS backport with kernel-version-matched patches; checking
+`.config` symbols alone does not validate that backport. The SUSFS source in
+the private kernel tree is unchanged, and BPF settings are unchanged.
+
+The workflow is pinned to kernel source revision `081909143`, used by the
+known-good `PitchKernel-munch-bakasu-20261028-0402` release. It exposes no
+variant or source-branch override; CI fails if the pinned revision cannot be
+resolved instead of falling back to the moving branch tip.
