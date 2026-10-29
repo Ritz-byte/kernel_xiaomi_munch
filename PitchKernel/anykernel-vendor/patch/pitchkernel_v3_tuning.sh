@@ -27,11 +27,9 @@ exec >> /data/local/tmp/pitchkernel_v3_proof.txt 2>&1
 #   - sched_util_est and sched_core_ctl_enable remain dropped (still not
 #     real, per original source scan — nothing in this recon contradicts
 #     that).
-#   - GPU min freq: still 400MHz. Recon didn't give us the live OPP table
-#     values (freq_table_mhz), so this number is UNCONFIRMED against the
-#     live table, only against the DTS in the original zip. If you want
-#     it nailed down: `cat /sys/class/kgsl/kgsl-3d0/freq_table_mhz` and
-#     send it back before relying on this in production.
+#   - GPU minimum-frequency clamp removed 2026-10-29. The old 400MHz floor
+#     was not verified against the live OPP table; leave minimum scaling to
+#     the stock GPU governor while retaining its normal maximum frequency.
 
 echo "v3 script started: $(date) pwd=$(pwd) args=$@" >> /data/local/tmp/pitchkernel_v3_proof.txt 2>&1
 LOG_TAG="PitchKernelV3"
@@ -101,10 +99,10 @@ for cpu in 0 1 2 3 4 5 6 7; do
     fi
 done
 
-### [GPU] KGSL clock clamp — confirmed present via recon ###
+### [GPU] Keep stock frequency limits ###
 
-log_rw "/sys/class/kgsl/kgsl-3d0/min_clock_mhz" "400"
-# max_clock_mhz intentionally NOT written — leaving at stock ceiling per spec.
+# Do not force min_clock_mhz: the prior 400MHz floor was not verified against
+# the live OPP table. Leave both minimum and maximum limits to stock scaling.
 
 ### [GPU] devfreq governor — confirmed node exists via recon ###
 
