@@ -111,7 +111,7 @@ jobs:
           # PitchKernel-munch-bakasu-20261028-0402. Bump only after a
           # successful device boot test.
           KERNEL_SOURCE_BRANCH: bakasu-integration
-          KERNEL_SOURCE_COMMIT: 081909143
+          KERNEL_SOURCE_COMMIT: '081909143'
           # PitchKernel: pitch_kernel_sm8250 is private -- see the clone
           # command below for why this secret is required and what scope
           # it needs. Passed through env: (not referenced directly in the
