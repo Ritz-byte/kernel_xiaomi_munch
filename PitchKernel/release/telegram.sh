@@ -5,7 +5,7 @@
 # Adapted from LuminaireProtocol/telegram.sh
 # Source this script after build; requires env vars:
 #   ZIP_PATH, ZIP_NAME, KERNEL_VERSION
-#   ROOT_SOLUTION (BAKASU|VANILLA) — driven by build.yml's matrix.
+#   ROOT_SOLUTION (BAKASU|BAKASU_SUSFS|VANILLA) — driven by build.yml's matrix.
 #   KERNEL_SRC, KERNEL_BRANCH, COMPILER_STRING
 # ======================================================
 
@@ -36,7 +36,8 @@ if [ "$ZIP_SIZE_BYTES" -gt "$TELEGRAM_MAX_FILE_BYTES" ]; then
 fi
 
 case "${ROOT_SOLUTION:-VANILLA}" in
-    BAKASU)            ROOT_DISPLAY="BakaSU (manual hooks)" ;;
+    BAKASU)            ROOT_DISPLAY="BakaSU (manual hooks, NoSUSFS)" ;;
+    BAKASU_SUSFS)      ROOT_DISPLAY="BakaSU + SUSFS" ;;
     VANILLA)           ROOT_DISPLAY="Vanilla" ;;
     *)                 ROOT_DISPLAY="${ROOT_SOLUTION}" ;;
 esac
