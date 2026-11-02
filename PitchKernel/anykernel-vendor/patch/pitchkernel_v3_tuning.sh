@@ -59,7 +59,7 @@ log -p i -t "$LOG_TAG" "pwd: $(pwd)"
 
 ### [SCHEDULER] sysctls — confirmed present via live recon 2026-07-09 ###
 
-log_rw "/proc/sys/kernel/sched_boost" "1"
+# Leave global scheduler boost at the kernel default for sustained thermals.
 log_rw "/proc/sys/kernel/sched_schedstats" "0"
 log_rw "/proc/sys/kernel/sched_latency_ns" "6000000"
 log_rw "/proc/sys/kernel/sched_min_granularity_ns" "1500000"
