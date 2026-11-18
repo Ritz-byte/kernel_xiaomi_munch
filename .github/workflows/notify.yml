@@ -10,7 +10,7 @@ jobs:
   on-push:
     name: Push Notify
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_name != 'codex/bakasu-susfs-validation'
     steps:
       - name: Notify Push
         run: |
@@ -81,3 +81,4 @@ jobs:
             -d "disable_web_page_preview=true" \
             --data-urlencode "text=${TEXT}" | jq '.ok'
             
+

@@ -1,0 +1,580 @@
+name: Validate BakaSU SUSFS
+'on':
+  push:
+    branches:
+    - codex/bakasu-susfs-validation
+    paths:
+    - .github/workflows/build-susfs-experimental.yml
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: bakasu-susfs-validation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    name: Experimental BakaSU SUSFS (munch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - label: BakaSU-SUSFS-EXPERIMENTAL
+          ksu_enable: 'true'
+          root_arg: ksu
+          root_provider: BakaSU (SUSFS, experimental)
+          root_solution_key: BAKASU
+          zip_type: bakasu-susfs-experimental
+    steps:
+    - name: Checkout PitchKernel repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        persist-credentials: false
+    - name: Cleanup disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /opt/ghc \
+          "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential git curl wget \
+          bison flex zip bc cpio libssl-dev \
+          python-is-python3 gcc-aarch64-linux-gnu \
+          device-tree-compiler dwarves
+    - name: Clone apasitu kernel source
+      env:
+        KERNEL_SOURCE_BRANCH: codex/bakasu-susfs-validation
+        KERNEL_SOURCE_COMMIT: 9087fe81a799bcdf5544b1c547426a1e3c3b14e5
+        PITCHKERNEL_REPO_PAT: ${{ secrets.PITCHKERNEL_REPO_PAT }}
+      run: |
+        echo "Cloning ${KERNEL_SOURCE_BRANCH} and pinning ${KERNEL_SOURCE_COMMIT}"
+        if [ -z "${PITCHKERNEL_REPO_PAT}" ]; then
+          echo "::error::PITCHKERNEL_REPO_PAT secret is not set. pitch_kernel_sm8250 is"
+          echo "::error::private and cannot be cloned without it -- add a PAT with read"
+          echo "::error::access to that repo as a secret named PITCHKERNEL_REPO_PAT in"
+          echo "::error::kernel_xiaomi_munch's repo settings."
+          exit 1
+        fi
+        git clone --depth=50 --single-branch -b "${KERNEL_SOURCE_BRANCH}" \
+          "https://x-access-token:${PITCHKERNEL_REPO_PAT}@github.com/Ritz-byte/pitch_kernel_sm8250.git" \
+          apasitu
+        if ! git -C apasitu rev-parse --verify "${KERNEL_SOURCE_COMMIT}^{commit}" >/dev/null 2>&1; then
+          echo "::error::Pinned source ${KERNEL_SOURCE_COMMIT} is not available in the fetched history. Refusing to build the moving branch tip."
+          exit 1
+        fi
+        git -C apasitu checkout --detach "${KERNEL_SOURCE_COMMIT}"
+        RESOLVED_COMMIT=$(git -C apasitu rev-parse HEAD)
+        case "${RESOLVED_COMMIT}" in
+          "${KERNEL_SOURCE_COMMIT}"*) ;;
+          *) echo "::error::Expected kernel source prefix ${KERNEL_SOURCE_COMMIT}, resolved ${RESOLVED_COMMIT}."; exit 1 ;;
+        esac
+        RESOLVED_SHA=$(git -C apasitu rev-parse --short HEAD)
+        if [ -z "${RESOLVED_SHA}" ]; then
+          echo "::error::Could not determine resolved kernel source revision."
+          exit 1
+        fi
+        echo "--- Initializing BakaSU submodule ---"
+        git -C apasitu submodule update --init --recursive
+        echo "--- Applying BakaSU post-exec compatibility patch ---"
+        bash apasitu/scripts/apply_bakasu_compat.sh
+        echo "--- Verifying BakaSU submodule populated ---"
+        test -f apasitu/KernelSU/kernel/runtime/ksud_integration.c && echo "OK: BakaSU ksud_integration.c present" || { echo "MISSING: BakaSU submodule did not populate correctly"; exit 1; }
+        test -e apasitu/drivers/kernelsu/Kconfig || { echo "MISSING: drivers/kernelsu does not resolve to BakaSU"; exit 1; }
+        ls apasitu/build.sh apasitu/build-miui.sh
+        echo "KERNEL_SOURCE_BRANCH=${KERNEL_SOURCE_BRANCH}" >> $GITHUB_ENV
+        echo "KERNEL_SOURCE_SHA=${RESOLVED_SHA}" >> $GITHUB_ENV
+        echo "Resolved to commit: ${RESOLVED_SHA}"
+        echo "--- Verifying kernel/sched/walt.c margin_up initializer content ---"
+        grep -n -A2 "sysctl_sched_capacity_margin_up\[MAX_MARGIN_LEVELS\]" apasitu/kernel/sched/walt.c || echo "PATTERN NOT FOUND"
+    - name: Guard BakaSU submodule pin consistency
+      run: |
+        BAKASU_URL=$(git -C apasitu config -f .gitmodules --get submodule.KernelSU.url || true)
+        EXPECTED_SHA=$(git -C apasitu ls-tree HEAD KernelSU | awk '{print $3}')
+        SUBMODULE_HEAD=$(git -C apasitu/KernelSU rev-parse HEAD || true)
+
+        echo "KernelSU submodule URL:      ${BAKASU_URL:-<not found>}"
+        echo "KernelSU gitlink SHA:         ${EXPECTED_SHA:-<not found>}"
+        echo "KernelSU submodule HEAD:     ${SUBMODULE_HEAD:-<not found>}"
+
+        FAIL=0
+
+        if [ "$BAKASU_URL" != "https://github.com/Baka-SU/BakaSU.git" ]; then
+          echo "::error::KernelSU submodule URL is not BakaSU: ${BAKASU_URL:-<missing>}"
+          FAIL=1
+        fi
+        if [ -z "$EXPECTED_SHA" ]; then
+          echo "::error::Could not resolve the KernelSU gitlink SHA"
+          FAIL=1
+        fi
+        if [ -z "$SUBMODULE_HEAD" ]; then
+          echo "::error::Could not resolve apasitu/KernelSU's checked-out HEAD"
+          FAIL=1
+        fi
+
+        if [ -n "$EXPECTED_SHA" ] && [ -n "$SUBMODULE_HEAD" ] && [ "$EXPECTED_SHA" != "$SUBMODULE_HEAD" ]; then
+          echo "::error::BakaSU checkout (${SUBMODULE_HEAD}) does not match the pinned KernelSU gitlink (${EXPECTED_SHA})."
+          FAIL=1
+        fi
+
+        if grep -qE 'RESUKISU_REF|ReSukiSU/ReSukiSU/main/kernel/setup.sh' apasitu/build.sh apasitu/build-miui.sh; then
+          echo "::error::A ReSukiSU installer or pin remains in a build script. BakaSU must come from the pinned submodule only."
+          FAIL=1
+        fi
+
+        for SCRIPT in apasitu/build.sh apasitu/build-miui.sh; do
+          if ! grep -Fq 'git submodule update --init --recursive KernelSU' "$SCRIPT"; then
+            echo "::error::${SCRIPT} does not initialize the pinned BakaSU submodule."
+            FAIL=1
+          fi
+          if ! grep -Fq 'bash scripts/apply_bakasu_compat.sh' "$SCRIPT"; then
+            echo "::error::${SCRIPT} does not apply the tracked BakaSU compatibility patch."
+            FAIL=1
+          fi
+        done
+
+        if [ "$FAIL" -eq 1 ]; then
+          echo "::error::BakaSU pin/setup validation failed. Refusing to start a long build with an incorrect provider source."
+          exit 1
+        fi
+
+        echo "OK: BakaSU URL, pinned gitlink, checked-out HEAD, and both build scripts agree."
+    - name: Run SUSFS hook regression tests
+      run: python3 apasitu/tests/test_bakasu_susfs.py -v
+    - name: Apply bypass charging patch
+      run: |
+        echo "Applying bypass charging patch to apasitu (branch=${KERNEL_SOURCE_BRANCH}, sha=${KERNEL_SOURCE_SHA})"
+        cd apasitu
+        git apply --check ../PitchKernel/patches/bypass_charging_munch.patch
+        git apply ../PitchKernel/patches/bypass_charging_munch.patch
+        echo "Patch applied cleanly."
+    - name: Setup ZyCromerZ Clang
+      run: |
+        mkdir -p "$HOME/neutron-clang"
+        cd "$HOME/neutron-clang"
+        curl -LO "https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260807-release/Clang-16.0.6-20260807.tar.gz"
+        if [ ! -s "Clang-16.0.6-20260807.tar.gz" ]; then
+          echo "::error::Download of ZyCromerZ Clang 16.0.6 tarball failed or produced an empty file. If ZyCromerZ has rolled this tag forward or removed it, check https://github.com/ZyCromerZ/Clang/releases for the current 16.0.6 asset filename and update the curl line above and the tar/rm lines below to match."
+          exit 1
+        fi
+        tar -xzf "Clang-16.0.6-20260807.tar.gz"
+        rm -f "Clang-16.0.6-20260807.tar.gz"
+        if [ ! -x "$HOME/neutron-clang/bin/clang" ]; then
+          echo "::error::Extracted archive does not contain bin/clang at the expected path. The archive's internal directory structure may differ from what was assumed -- inspect it manually."
+          ls -la "$HOME/neutron-clang"
+          exit 1
+        fi
+    - name: Verify ATFWD-daemon not excluded from sucompat
+      run: |
+        SUCOMPAT_DIR="apasitu/KernelSU/kernel/feature"
+        [ -d "$SUCOMPAT_DIR" ] || { echo "FATAL: BakaSU feature directory missing: $SUCOMPAT_DIR"; exit 1; }
+        if grep -Rn "ATFWD-daemon" "$SUCOMPAT_DIR"; then
+          echo "FATAL: ATFWD-daemon still present in KernelSU source after patch step."
+          exit 1
+        fi
+        echo "OK: ATFWD-daemon not found in BakaSU sucompat feature sources."
+    - name: Set PitchKernel name
+      run: |
+        echo "-pitchkernel" > apasitu/localversion-st
+        echo "" > apasitu/localversion-cip
+    - name: Neutralize apasitu's AnyKernel3 clone (use vendored copy instead)
+      run: |
+        sed -i 's@git clone https://github.com/AstideLabs/AnyKernel3 -b master --single-branch --depth=1 anykernel@true  # PitchKernel: clone disabled, vendored copy seeded in CI workflow before build.sh runs@' \
+          apasitu/build.sh apasitu/build-miui.sh
+        sed -i '/^rm -rf anykernel\/$/d' apasitu/build.sh apasitu/build-miui.sh
+
+        echo "Confirming no live git clone of any AnyKernel3 remains in build.sh/build-miui.sh:"
+        if grep -n "git clone.*AnyKernel3" apasitu/build.sh apasitu/build-miui.sh; then
+          echo "::error::A live AnyKernel3 clone is still present after neutralization -- sed pattern did not match, fix the pattern above."
+          exit 1
+        fi
+        echo "OK: no remaining AnyKernel3 clone in either script."
+
+        echo "Confirming the top-level 'rm -rf anykernel/' cleanup was also removed:"
+        if grep -n "^rm -rf anykernel/$" apasitu/build.sh apasitu/build-miui.sh; then
+          echo "::error::rm -rf anykernel/ still present -- it will delete the seeded vendored copy below before build.sh finishes. Fix the sed pattern above."
+          exit 1
+        fi
+        echo "OK: no destructive top-level anykernel/ wipe remains (rm -rf anykernel/kernels/ later in both scripts is untouched and still runs normally)."
+
+        echo "Seeding apasitu/anykernel from vendored PitchKernel/anykernel-vendor..."
+        rm -rf apasitu/anykernel
+        cp -r PitchKernel/anykernel-vendor apasitu/anykernel
+        [ -f apasitu/anykernel/tools/ak3-core.sh ] || { echo "::error::vendored ak3-core.sh missing after seed copy"; exit 1; }
+        [ -f apasitu/anykernel/anykernel.sh ] || { echo "::error::vendored anykernel.sh missing after seed copy"; exit 1; }
+        echo "OK: apasitu/anykernel seeded from vendored tree ($(find apasitu/anykernel -type f | wc -l) files)."
+    - name: Patch defconfig
+      run: |
+        DEFCONFIG="apasitu/arch/arm64/configs/munch_defconfig"
+        [ -f "$DEFCONFIG" ] || { echo "ERROR: $DEFCONFIG not found"; exit 1; }
+
+        sed -i 's/CONFIG_LOCALVERSION="-aptusitu-perf"/CONFIG_LOCALVERSION=""/' "$DEFCONFIG"
+
+        cd apasitu
+        ./scripts/config --file arch/arm64/configs/munch_defconfig \
+          --disable LOCALVERSION_AUTO
+        cd ..
+
+        {
+          echo ""
+          echo "# TCP congestion control - PitchKernel"
+          echo "CONFIG_TCP_CONG_ADVANCED=y"
+          echo "CONFIG_TCP_CONG_BBR=y"
+          echo "CONFIG_TCP_CONG_WESTWOOD=y"
+          echo "CONFIG_NET_SCH_FQ=y"
+          echo "CONFIG_DEFAULT_BBR=y"
+          echo ""
+          echo "# I/O scheduler — PitchKernel"
+          echo "# CONFIG_IOSCHED_CFQ is not set"
+          echo "CONFIG_MQ_IOSCHED_DEADLINE=y"
+          echo 'CONFIG_DEFAULT_IOSCHED="mq-deadline"'
+        } >> "$DEFCONFIG"
+
+        cd apasitu
+        ./scripts/config --file arch/arm64/configs/munch_defconfig \
+          --enable MQ_IOSCHED_DEADLINE \
+          --disable IOSCHED_CFQ \
+          --disable MQ_IOSCHED_KYBER \
+          --set-str DEFAULT_IOSCHED "mq-deadline" \
+          --enable SCSI_MQ_DEFAULT \
+          --enable BLK_WBT_MQ
+        cd ..
+
+
+        cd apasitu
+        ./scripts/config --file arch/arm64/configs/munch_defconfig \
+          --enable THERMAL \
+          --enable THERMAL_OF \
+          --enable THERMAL_GOV_STEP_WISE \
+          --enable QCOM_TSENS \
+          --enable QCOM_SPMI_TEMP_ALARM
+        cd ..
+
+        echo "Patched defconfig (tail -20):"
+        tail -20 "$DEFCONFIG"
+        echo ""
+        echo "Verifying uclamp directives:"
+        grep -E "UCLAMP_TASK|LOCALVERSION_AUTO" "$DEFCONFIG" || echo "WARNING: grep found nothing"
+    - name: Build kernel
+      env:
+        KBUILD_BUILD_TIMESTAMP: ''
+        KBUILD_BUILD_USER: pitchkernel
+        KBUILD_BUILD_HOST: github-actions
+        CCACHE_DIR: /home/runner/.cache/ccache_mikernel
+        CCACHE_MAXSIZE: 5G
+        CCACHE_COMPILERCHECK: content
+        CCACHE_COMPRESS: 'true'
+        CCACHE_COMPRESSLEVEL: '6'
+        CCACHE_SLOPPINESS: include_file_mtime,include_file_ctime,time_macros
+        CCACHE_BASEDIR: ${{ github.workspace }}
+        PITCHKERNEL_SUSFS_EXPERIMENTAL: '1'
+        PITCHKERNEL_NO_CCACHE: '1'
+      run: |
+        cd apasitu
+        chmod +x build.sh build-miui.sh
+        LOG="/tmp/pitchkernel-build-step.log"
+
+        set +e
+        export TOOLCHAIN_PATH="$HOME/neutron-clang/bin"
+        bash build.sh munch ${{ matrix.root_arg }} > "$LOG" 2>&1
+        BUILD_EXIT=$?
+        set -e
+
+        echo "### Build step finished, exit code: $BUILD_EXIT ###"
+        echo "Full output captured to $LOG ($(wc -l < "$LOG") lines)."
+        echo "Last 60 lines:"
+        tail -60 "$LOG"
+
+        if [ "$BUILD_EXIT" -ne 0 ]; then
+          echo "::error::build.sh exited $BUILD_EXIT — see full log above/artifact."
+          exit "$BUILD_EXIT"
+        fi
+    - name: Check for LLVM LTO broken-pipe errors
+      run: |
+        LOG="/tmp/pitchkernel-build-step.log"
+        [ -f "$LOG" ] || { echo "No build-step log captured -- cannot check. Failing closed."; exit 1; }
+
+        COUNT=$(grep -c "LLVM ERROR: IO failure on output stream: Broken pipe" "$LOG" || true)
+        if [ "$COUNT" -gt 0 ]; then
+          echo "::error::Found $COUNT occurrence(s) of 'LLVM ERROR: IO failure on output stream: Broken pipe' in the build log."
+          echo "This is a known LTO/lld resource-contention failure mode (full LTO + make -j\$(nproc) double-parallelism on a 4-core runner)."
+          echo "build.sh's LTO_LINK_JOBS thread cap (KBUILD_LDFLAGS=-mllvm -threads=N) should have prevented this — check that it is still present and still exported before MAKE_ARGS is used."
+          echo "Do not classify this as benign noise without re-tracing it: a broken pipe mid-LTO-codegen has not been proven safe, only observed to not have broken past builds."
+          exit 1
+        fi
+
+        echo "No LLVM broken-pipe errors found in build log."
+    - name: Verify BakaSU hooks and selected variant compiled in
+      run: |
+        if [ "${{ matrix.ksu_enable }}" != "true" ]; then
+          echo "matrix.ksu_enable=false (variant: ${{ matrix.label }}) — no BakaSU expected, skipping verification."
+          exit 0
+        fi
+
+        EXEC_SOURCE="apasitu/fs/exec.c"
+        if ! awk '
+          /retval = exec_binprm\(bprm\);/ { after_exec = 1; next }
+          after_exec && /ksu_handle_post_execveat/ { found = 1 }
+          after_exec && /return retval;/ { exit (found ? 0 : 1) }
+          END { if (!found) exit 1 }
+        ' "$EXEC_SOURCE"; then
+          echo "FATAL: BakaSU post-exec hook is missing from the successful exec path in $EXEC_SOURCE."
+          exit 1
+        fi
+
+        if ! awk '
+          /^out_ret:/ { in_error_path = 1; next }
+          in_error_path && /ksu_handle_post_execveat/ { found = 1 }
+          in_error_path && /return retval;/ { exit (found ? 0 : 1) }
+          END { if (!found) exit 1 }
+        ' "$EXEC_SOURCE"; then
+          echo "FATAL: BakaSU post-exec hook is missing from the exec error path in $EXEC_SOURCE."
+          exit 1
+        fi
+
+        BAKASU_SOURCE="apasitu/KernelSU/kernel/feature/sucompat.c"
+        if ! grep -Fq 'clear_thread_flag(TIF_PROC_IN_KSU_EXECVE);' "$BAKASU_SOURCE" ||
+           ! grep -Fq 'if (retval && *retval < 0)' "$BAKASU_SOURCE"; then
+          echo "FATAL: BakaSU post-exec flag compatibility patch is missing or incomplete in $BAKASU_SOURCE."
+          exit 1
+        fi
+        if ! awk '
+          /int ksu_handle_post_execve_common/ { in_handler = 1 }
+          in_handler && /clear_thread_flag\(TIF_PROC_IN_KSU_EXECVE\)/ { clear_line = NR }
+          in_handler && /if \(retval && \*retval < 0\)/ { error_guard_line = NR }
+          in_handler && /ksu_install_su_fd\(\)/ { install_line = NR; exit }
+          END {
+            if (clear_line && error_guard_line && install_line &&
+                clear_line < error_guard_line && error_guard_line < install_line)
+              exit 0
+            exit 1
+          }
+        ' "$BAKASU_SOURCE"; then
+          echo "FATAL: BakaSU must consume the pending flag and reject failed execs before installing the session FD."
+          exit 1
+        fi
+
+        CONFIG_FILE="apasitu/out/.config"
+        [ -f "$CONFIG_FILE" ] || { echo "FATAL: $CONFIG_FILE not found — build may not have produced a config"; exit 1; }
+
+        BAD=0
+        REQUIRED_SYMS="CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_THREAD_INFO_IN_TASK CONFIG_64BIT"
+        for SYM in $REQUIRED_SYMS; do
+          if grep -q "^${SYM}=y" "$CONFIG_FILE"; then
+            echo "  OK: ${SYM}=y"
+          else
+            echo "  MISSING: ${SYM} is not set to y"
+            BAD=1
+          fi
+        done
+
+        for CONFIG_FILE in apasitu/pitchkernel-aosp.config apasitu/pitchkernel-miui.config; do
+          [ -f "$CONFIG_FILE" ] || { echo "FATAL: missing config snapshot $CONFIG_FILE"; exit 1; }
+          for SYM in $REQUIRED_SYMS CONFIG_BPF CONFIG_BPF_SYSCALL CONFIG_BPF_JIT CONFIG_BPF_LSM CONFIG_CGROUP_BPF CONFIG_NET_CLS_BPF CONFIG_NET_ACT_BPF CONFIG_BPF_EVENTS; do
+            grep -qx "${SYM}=y" "$CONFIG_FILE" || { echo "FATAL: ${SYM}=y missing in $CONFIG_FILE"; exit 1; }
+          done
+          if grep -qE '^CONFIG_KSU_(MANUAL_HOOK.*|TRACEPOINT_HOOK)=y' "$CONFIG_FILE"; then
+            echo "FATAL: conflicting hook mode in $CONFIG_FILE"
+            exit 1
+          fi
+        done
+        "$HOME/neutron-clang/bin/llvm-nm" apasitu/out/vmlinux > /tmp/pitchkernel-symbols.txt
+        for SYM in susfs_init ksu_handle_post_execveat ksu_handle_faccessat ksu_handle_stat; do
+          grep -qE "[[:space:]]${SYM}$" /tmp/pitchkernel-symbols.txt || { echo "FATAL: compiled symbol $SYM missing"; exit 1; }
+        done
+
+        if [ "$BAD" -eq 1 ]; then
+          echo ""
+          echo "FATAL: BakaSU configuration is incomplete or conflicting."
+          exit 1
+        fi
+
+        echo "'${{ matrix.label }}' verification passed — the requested BakaSU hook configuration is enabled."
+    - name: Verify touch tuning defaults actually landed
+      run: |
+        DTSI_FILE="apasitu/arch/arm64/boot/dts/vendor/qcom/munch-sm8250.dtsi"
+        [ -f "$DTSI_FILE" ] || { echo "FATAL: $DTSI_FILE not found"; exit 1; }
+
+        echo "Checking $DTSI_FILE for touch-def-array..."
+        if grep -q "focaltech,touch-def-array = <2 2 2 2>;" "$DTSI_FILE"; then
+          echo "  OK: focaltech,touch-def-array = <2 2 2 2>;"
+        else
+          echo "  FATAL: touch-def-array is not <2 2 2 2> in $DTSI_FILE"
+          echo "  Current value:"
+          grep "focaltech,touch-def-array" "$DTSI_FILE" || echo "    (property not found at all)"
+          exit 1
+        fi
+
+        echo "Touch tuning defaults verification passed — real, not just labeled."
+    - name: Verify pitchkernel scripts are in the AK3 overlay
+      run: |
+        for f in pitchkernel_cpufreq.sh pitchkernel_banking_prep.sh pitchkernel_v3_tuning.sh pitchkernel_zram_resize.sh; do
+          TARGET="PitchKernel/anykernel-vendor/patch/$f"
+          if [ ! -f "$TARGET" ]; then
+            echo "FATAL: $TARGET missing from repo — will not be installed to post-fs-data.d"
+            exit 1
+          fi
+          if [ ! -x "$TARGET" ]; then
+            echo "WARNING: $TARGET is not executable — fixing"
+            chmod 755 "$TARGET"
+          fi
+          if grep -q "log -p.*PitchKernel" "$TARGET"; then
+            : # hardcoded tag present
+          elif grep -qE '^[[:space:]]*LOG_TAG=.*PitchKernel' "$TARGET" && grep -q 'log -p.*"$LOG_TAG"' "$TARGET"; then
+            : # tag set via LOG_TAG variable and used in a log -p call
+          else
+            echo "WARNING: $TARGET has no 'log -p.*PitchKernel' line (hardcoded or via LOG_TAG) — boot execution will be silent"
+          fi
+          echo "OK: $TARGET"
+        done
+    - name: Verify ak3-core.sh is complete
+      run: |
+        TARGET="apasitu/anykernel/tools/ak3-core.sh"
+        [ -f "$TARGET" ] || { echo "ERROR: $TARGET not found — build may have failed"; exit 1; }
+        LINES=$(wc -l < "$TARGET")
+        echo "ak3-core.sh: $LINES lines"
+        if [ "$LINES" -lt 900 ]; then
+          echo "FATAL: ak3-core.sh is truncated at $LINES lines."
+          echo "This file comes from PitchKernel/anykernel-vendor/tools/ak3-core.sh,"
+          echo "vendored directly in this repo (kernel_xiaomi_munch) -- there is no"
+          echo "external fork or clone in the loop anymore. Fix it in place:"
+          echo ""
+          echo "  cd kernel_xiaomi_munch"
+          echo "  curl -fsSL https://raw.githubusercontent.com/osm0sis/AnyKernel3/master/tools/ak3-core.sh \\"
+          echo "    -o PitchKernel/anykernel-vendor/tools/ak3-core.sh"
+          echo "  git add PitchKernel/anykernel-vendor/tools/ak3-core.sh"
+          echo "  git commit -m 'fix: restore complete ak3-core.sh in vendored AnyKernel3'"
+          echo "  git push"
+          exit 1
+        fi
+        bash -n "$TARGET" || { echo "FATAL: ak3-core.sh has a syntax error"; exit 1; }
+        echo "ak3-core.sh OK ($LINES lines, passes bash -n)"
+    - name: Verify vendored AnyKernel3 overlay is intact
+      run: |
+        AK3_BUILT="apasitu/anykernel"
+        [ -d "$AK3_BUILT" ] || { echo "ERROR: $AK3_BUILT not found — build failed or wiped it"; exit 1; }
+
+        echo "Verifying PitchKernel customizations survived build.sh..."
+        grep -m1 "PitchKernel by Mujinn" "$AK3_BUILT/anykernel.sh" \
+          || { echo "ERROR: anykernel.sh does not look like our version"; exit 1; }
+        grep -m1 "PitchKernel" "$AK3_BUILT/patch/pitchkernel_cpufreq.sh" \
+          || { echo "ERROR: pitchkernel_cpufreq.sh missing expected content"; exit 1; }
+        test -f "$AK3_BUILT/patch/pitchkernel_banking_prep.sh" \
+          || { echo "ERROR: pitchkernel_banking_prep.sh missing"; exit 1; }
+        test -f "$AK3_BUILT/patch/pitchkernel_v3_tuning.sh" \
+          || { echo "ERROR: pitchkernel_v3_tuning.sh missing"; exit 1; }
+        test -f "$AK3_BUILT/tools/ak3-core.sh" \
+          || { echo "ERROR: tools/ak3-core.sh missing — vendored tree incomplete"; exit 1; }
+        test -f "$AK3_BUILT/META-INF/com/google/android/update-binary" \
+          || { echo "ERROR: update-binary missing — vendored tree incomplete"; exit 1; }
+        echo "Vendored AnyKernel3 overlay intact."
+    - name: Package zip (AOSP + MIUI, split)
+      run: |
+        DATE=$(date +%Y%m%d-%H%M)
+        TYPE="${{ matrix.zip_type }}"
+        ARTIFACT_LABEL="${{ matrix.zip_type }}"
+        echo "BUILD_DATE=${DATE}" >> $GITHUB_ENV
+        echo "BUILD_TYPE=${TYPE}" >> $GITHUB_ENV
+        echo "ARTIFACT_LABEL=${ARTIFACT_LABEL}" >> $GITHUB_ENV
+
+        AOSP_SRC_ZIP=$(find apasitu -maxdepth 1 -name "PitchKernel_AOSP_*.zip" | head -1)
+        [ -n "$AOSP_SRC_ZIP" ] && [ -f "$AOSP_SRC_ZIP" ] || \
+          { echo "ERROR: PitchKernel_AOSP_*.zip not found. Available zips:"; find apasitu -maxdepth 1 -name "*.zip"; exit 1; }
+        echo "AOSP source: $AOSP_SRC_ZIP ($(du -sh $AOSP_SRC_ZIP | cut -f1))"
+
+        MIUI_SRC_ZIP=$(find apasitu -maxdepth 1 -name "PitchKernel_MIUI_*.zip" | head -1)
+        [ -n "$MIUI_SRC_ZIP" ] && [ -f "$MIUI_SRC_ZIP" ] || \
+          { echo "ERROR: PitchKernel_MIUI_*.zip not found. Available zips:"; find apasitu -maxdepth 1 -name "*.zip"; exit 1; }
+        echo "MIUI source: $MIUI_SRC_ZIP ($(du -sh $MIUI_SRC_ZIP | cut -f1))"
+
+        mkdir -p /tmp/kernel_files/aosp /tmp/kernel_files/miui
+        unzip -q -j "$AOSP_SRC_ZIP" "kernels/aosp/Image" "kernels/aosp/dtb" "kernels/aosp/dtbo.img" -d /tmp/kernel_files/aosp/
+        unzip -q -j "$MIUI_SRC_ZIP" "kernels/miui/Image" "kernels/miui/dtb" "kernels/miui/dtbo.img" -d /tmp/kernel_files/miui/
+
+        for os in aosp miui; do
+          for f in Image dtb dtbo.img; do
+            [ -f "/tmp/kernel_files/$os/$f" ] || { echo "ERROR: $f not found for $os"; exit 1; }
+          done
+        done
+        echo "Kernel files:"; ls -lh /tmp/kernel_files/aosp /tmp/kernel_files/miui
+
+        AK3_DIR="apasitu/anykernel"
+        [ -d "$AK3_DIR" ] || { echo "ERROR: $AK3_DIR not found"; ls apasitu/; exit 1; }
+
+        ZIP_NAMES=()
+        for os in aosp miui; do
+          WORKDIR="/tmp/ak3_build_${os}"
+          rm -rf "$WORKDIR"
+          cp -r "$AK3_DIR" "$WORKDIR"
+
+          CORE_LINES=$(wc -l < "$WORKDIR/tools/ak3-core.sh")
+          [ "$CORE_LINES" -gt 900 ] || { echo "FATAL: ak3-core.sh truncated in WORKDIR ($os)"; exit 1; }
+          bash -n "$WORKDIR/tools/ak3-core.sh" || { echo "FATAL: ak3-core.sh syntax error ($os)"; exit 1; }
+          bash -n "$WORKDIR/META-INF/com/google/android/update-binary" || \
+            { echo "FATAL: update-binary syntax error ($os)"; exit 1; }
+
+          grep -q "__PITCHKERNEL_OS__" "$WORKDIR/anykernel.sh" || \
+            { echo "FATAL: __PITCHKERNEL_OS__ placeholder not found in anykernel.sh -- vendored copy out of sync with expected split-zip format"; exit 1; }
+          sed -i "s/__PITCHKERNEL_OS__/${os}/" "$WORKDIR/anykernel.sh"
+          grep -q "os=\"${os}\";" "$WORKDIR/anykernel.sh" || \
+            { echo "FATAL: os substitution did not take effect for $os"; exit 1; }
+
+          rm -rf "$WORKDIR/kernels"
+          mkdir -p "$WORKDIR/kernels/${os}"
+          cp "/tmp/kernel_files/${os}/Image"    "$WORKDIR/kernels/${os}/"
+          cp "/tmp/kernel_files/${os}/dtb"      "$WORKDIR/kernels/${os}/"
+          cp "/tmp/kernel_files/${os}/dtbo.img" "$WORKDIR/kernels/${os}/"
+          [ -f "$WORKDIR/kernels/${os}/Image" ] || { echo "ERROR: $os Image missing after copy"; exit 1; }
+
+          ZIP_NAME="PitchKernel-${TYPE}-munch-${os}-${DATE}.zip"
+          ( cd "$WORKDIR" && zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" . -x ".git/*" -x "*.gitignore" >/dev/null )
+
+          unzip -l "$GITHUB_WORKSPACE/$ZIP_NAME" | grep -q "kernels/${os}/Image" || \
+            { echo "ERROR: kernels/${os}/Image missing from $ZIP_NAME"; exit 1; }
+
+          echo "Packaged: $ZIP_NAME ($(du -sh "$GITHUB_WORKSPACE/$ZIP_NAME" | cut -f1))"
+          ZIP_NAMES+=("$ZIP_NAME")
+        done
+
+        echo "ZIP_NAME_AOSP=${ZIP_NAMES[0]}" >> $GITHUB_ENV
+        echo "ZIP_NAME_MIUI=${ZIP_NAMES[1]}" >> $GITHUB_ENV
+        {
+          echo "ZIP_NAMES_ALL<<EOF_ZIP_NAMES"
+          echo "${ZIP_NAMES[0]}"
+          echo "${ZIP_NAMES[1]}"
+          echo "EOF_ZIP_NAMES"
+        } >> $GITHUB_ENV
+    - name: Upload artifact (AOSP)
+      uses: actions/upload-artifact@v4
+      with:
+        name: PitchKernel-munch-${{ env.ARTIFACT_LABEL }}-aosp-${{ github.run_number }}
+        path: ${{ env.ZIP_NAME_AOSP }}
+        if-no-files-found: error
+        retention-days: 7
+    - name: Upload artifact (MIUI)
+      uses: actions/upload-artifact@v4
+      with:
+        name: PitchKernel-munch-${{ env.ARTIFACT_LABEL }}-miui-${{ github.run_number }}
+        path: ${{ env.ZIP_NAME_MIUI }}
+        if-no-files-found: error
+        retention-days: 7
+    - name: Upload configuration snapshots
+      uses: actions/upload-artifact@v4
+      with:
+        name: PitchKernel-bakasu-susfs-configs-${{ github.run_number }}
+        path: apasitu/pitchkernel-*.config
+        if-no-files-found: error
+        retention-days: 7
+    - name: Upload build diagnostics
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: PitchKernel-bakasu-susfs-log-${{ github.run_number }}
+        path: |-
+          /tmp/pitchkernel-build-step.log
+          apasitu/pitchkernel-*.config
+        if-no-files-found: ignore
+        retention-days: 7
+    - name: Record validation status
+      run: echo "Experimental BakaSU + SUSFS compilation passed. Device boot and root validation remain required." >> "$GITHUB_STEP_SUMMARY"
