@@ -4,7 +4,7 @@
 
 ## AnyKernel setup
 properties() { '
-kernel.string=PitchKernel by Mujinn
+kernel.string=PitchKernel by Ritz
 do.devicecheck=1
 do.modules=0
 do.systemless=1
@@ -39,7 +39,7 @@ if ! type write_boot > /dev/null 2>&1; then
 fi;
 
 ui_print " ";
-ui_print "  PitchKernel by Mujinn";
+ui_print "  PitchKernel by Ritz";
 ui_print " ";
 
 ## ROM selection: split-zip model (2026-09-22). Each PitchKernel zip now
