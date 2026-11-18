@@ -259,7 +259,7 @@ jobs:
     - name: Build kernel
       env:
         KBUILD_BUILD_TIMESTAMP: ''
-        KBUILD_BUILD_USER: pitchkernel
+        KBUILD_BUILD_USER: Ritz
         KBUILD_BUILD_HOST: github-actions
         CCACHE_DIR: /home/runner/.cache/ccache_mikernel
         CCACHE_MAXSIZE: 5G
@@ -456,7 +456,7 @@ jobs:
         [ -d "$AK3_BUILT" ] || { echo "ERROR: $AK3_BUILT not found — build failed or wiped it"; exit 1; }
 
         echo "Verifying PitchKernel customizations survived build.sh..."
-        grep -m1 "PitchKernel by Mujinn" "$AK3_BUILT/anykernel.sh" \
+        grep -Fq 'ui_print "  PitchKernel by Ritz";' "$AK3_BUILT/anykernel.sh" \
           || { echo "ERROR: anykernel.sh does not look like our version"; exit 1; }
         grep -m1 "PitchKernel" "$AK3_BUILT/patch/pitchkernel_cpufreq.sh" \
           || { echo "ERROR: pitchkernel_cpufreq.sh missing expected content"; exit 1; }
@@ -507,6 +507,8 @@ jobs:
           WORKDIR="/tmp/ak3_build_${os}"
           rm -rf "$WORKDIR"
           cp -r "$AK3_DIR" "$WORKDIR"
+          sed -i 's/^kernel\.string=.*/kernel.string=PitchKernel by Ritz/' "$WORKDIR/anykernel.sh"
+          grep -Fxq 'kernel.string=PitchKernel by Ritz' "$WORKDIR/anykernel.sh" || exit 1
 
           CORE_LINES=$(wc -l < "$WORKDIR/tools/ak3-core.sh")
           [ "$CORE_LINES" -gt 900 ] || { echo "FATAL: ak3-core.sh truncated in WORKDIR ($os)"; exit 1; }
