@@ -1,0 +1,56 @@
+name: Publish Ritz SUSFS Build 2
+on:
+  push:
+    branches: [codex/bakasu-susfs-validation]
+    paths: [.github/workflows/publish-ritz-build2.yml]
+permissions:
+  contents: write
+  actions: read
+concurrency: publish-ritz-build2
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: PitchKernel-munch-bakasu-susfs-20261118-build2
+      BUILD_SHA: c69e50af1fac2311d01988981585af8c57dd985c
+    steps:
+      - name: Verify Build 2 and publish its flashable ZIPs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(gh api "repos/$GH_REPO/actions/runs/44213438210" --jq '[.conclusion,.head_sha]|join(" ")')" == "success $BUILD_SHA" ]]
+          mkdir assets
+          for rom in aosp miui; do
+            case "$rom" in
+              aosp) id=14387548847; digest=2f3f752605ff8e337306a38637f2eac835affe2b4d2b243b011d07ca884c1d36 ;;
+              miui) id=14387104839; digest=7678acb70b73ee92306e2877114000c1c5bb8c633863b4925382a800b38c4b26 ;;
+            esac
+            gh api "repos/$GH_REPO/actions/artifacts/$id/zip" > "$rom.zip"
+            echo "$digest  $rom.zip" | sha256sum -c -
+            mapfile -t files < <(unzip -Z1 "$rom.zip")
+            [[ ${#files[@]} == 1 && ${files[0]} == PitchKernel-*-"$rom"-*.zip && ${files[0]} != */* ]]
+            out="assets/PitchKernel-Ritz-munch-BakaSU-SUSFS-build2-$rom.zip"
+            unzip -p "$rom.zip" "${files[0]}" > "$out"
+            unzip -tq "$out"
+            unzip -Z1 "$out" > listing
+            grep -Fxq "kernels/$rom/Image" listing
+          done
+          (cd assets && sha256sum *.zip > SHA256SUMS.txt)
+          cat > notes.md <<'EOF'
+          PitchKernel by Ritz for POCO F4 / Redmi K40S (munch). Linux 4.19.325, BakaSU and SUSFS v2.3.0.
+
+          - Fixed filename handling in the SUSFS stat and access hooks.
+          - Fixed post-exec callbacks on successful and failed executable launches.
+          - Added regression tests and checks for SUSFS and BPF in both ROM configs.
+          - Build 2 identifies the builder as Ritz and displays PitchKernel by Ritz in recovery.
+
+          **Downloads:** Choose AOSP for crDroid and MIUI for MIUI/HyperOS. Release ZIPs are directly flashable AnyKernel3 packages. SHA256SUMS.txt covers both files.
+
+          **Testing:** Both Build 2 packages passed CI. Ritz confirmed boot and SUSFS v2.3.0 detection on the preceding AOSP build on POCO F4 with crDroid Android 16. Device testing of these Build 2 packages is unconfirmed.
+
+          **Credits:** Ritz for maintenance and device testing, Mujinn and AstideLabs for the kernel base, BakaSU and KernelSU contributors for root support, simonpunk and SUSFS contributors, osm0sis for AnyKernel3, ZyCromerZ for Clang, and vc-teahouse for Baseband-guard.
+          EOF
+          gh release create "$TAG" assets/* --target "$BUILD_SHA" --title "PitchKernel by Ritz | BakaSU + SUSFS v2.3.0 | munch | Build 2" --notes-file notes.md --draft
+          gh release edit "$TAG" --draft=false --latest
